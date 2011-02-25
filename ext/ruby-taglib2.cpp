@@ -1,3 +1,7 @@
+#include <errno.h>
+#include <string.h>
+#include <stdio.h>
+
 #include <attachedpictureframe.h>
 #include <fileref.h>
 #include <flacfile.h>
@@ -100,6 +104,87 @@ TagLib::File *MahoroFileTypeResolver::createFile(const char *fileName, bool read
 static VALUE requireMahoro(VALUE)
 {
 	return rb_require("mahoro");
+}
+
+////////////////////////
+// Class to do a naive file type detection, based on the first four
+// "magic" bytes of the file.j
+// File magic is not always reliable (e.g. mine returned 'GLS_BINARY_LSB_FIRST' for an MP3 file).
+////////////////////////
+class NaiveFileTypeResolver : public TagLib::FileRef::FileTypeResolver
+{
+public:
+	virtual TagLib::File *createFile(const char *, bool, TagLib::AudioProperties::ReadStyle) const;
+};
+
+// check some obvious (i.e. naive) file type markers, then just try each type in turn.
+TagLib::File *NaiveFileTypeResolver::createFile(const char *fileName, bool read,
+                                                TagLib::AudioProperties::ReadStyle style) const
+{
+    TagLib::File *ret = 0;
+    FILE *media = 0;
+    char fileid[4] = "";
+    size_t bytes = 0;
+
+    if ( (media = fopen(fileName,"rb")) == NULL )
+    {
+        char err[256];
+        strerror_r(errno, err, sizeof(err));
+        rb_warning("couldn't open %s: %s", fileName, err);
+        return 0;
+    }
+
+    bytes = fread(fileid, sizeof(char), 4, media);
+    fprintf(stderr, "Read %d bytes\n", (int) bytes);
+    if (bytes != 4)
+    {
+        if (ferror(media)) {
+            char err[256];
+            strerror_r(errno, err, sizeof(err));
+            rb_warning("couldn't read %s: %s", fileName, err);
+        }
+        fclose(media);
+        return 0;
+    }
+    fclose(media);
+
+    // ID3 header
+    if ( memcmp(fileid,"ID3",3) == 0 )
+    {
+        ret = new TagLib::MPEG::File(fileName, read, style);
+        if (ret->isOpen() && ret->isValid())
+        {
+            return ret;
+        }
+        delete ret;
+        return 0;
+    }
+
+    // FLAC header
+    if ( memcmp(fileid,"fLaC",4) == 0 )
+    {
+        ret = new TagLib::FLAC::File(fileName, read, style);
+        if (ret->isOpen() && ret->isValid())
+        {
+            return ret;
+        }
+        delete ret;
+        return 0;
+    }
+
+    // Ogg Vorbis
+    if ( memcmp(fileid,"OggS",4) == 0 )
+    {
+        ret = new TagLib::Vorbis::File(fileName, read, style);
+        if (ret->isOpen() && ret->isValid())
+        {
+            return ret;
+        }
+        delete ret;
+        return 0;
+    }
+
+	return 0;
 }
 
 ////////////////////////
@@ -462,5 +547,9 @@ extern "C" void Init_taglib2(void)
 	int failed = 0;
 	VALUE ret = rb_protect(requireMahoro, Qnil, &failed);
 
+  // This is faster (and I'm guessing more correct) than the Mahoro
+  // resolver, so queue it up first.
+  TagLib::FileRef::addFileTypeResolver(new NaiveFileTypeResolver);
+	
 	rb_define_const(TagLib2Module, "MAHORO_PRESENT", failed ? Qfalse : Qtrue);
 }
